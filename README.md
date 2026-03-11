@@ -31,7 +31,7 @@ Video Adaptation for TENT method for TTA
 2. Click on the "Download" link to download the dataset (you may need to fill out a form to get access).
 3. Once downloaded, extract the contents and organize them into the `datasets/UCF50/` directory as shown above.
 
-(alternate)
+(alternate on linux)
 ```bash
 wget --no-check-certificate  https://www.crcv.ucf.edu/data/UCF50.rar
 ```
