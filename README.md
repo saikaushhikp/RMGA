@@ -2,6 +2,7 @@
 Video Adaptation for TENT method for TTA
 
 # Download the UCF50 dataset and place it in the following structure:
+```
 ├──datasets/
    ├──UCF50_mixed_labels.csv    # CSV file with video names and their corrupted types
    ├──.gitkeep    #things to keep the folder structure in git
@@ -21,6 +22,7 @@ Video Adaptation for TENT method for TTA
    │   └── ApplyLipstick/
    │   ├── v_ApplyLipstick_g01_c01.avi
    │   ├── v_ApplyLipstick_g01_c02.avi  
+```
 
 
 # downloading the UCF50 dataset
