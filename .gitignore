@@ -209,3 +209,4 @@ __marimo__/
 #datasets
 datasets/*
 !datasets/.gitkeep
+!datasets/UCF50_mixed_labels.csv

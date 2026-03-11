@@ -11,25 +11,25 @@ For each requested corruption type  c  an output tree is created:
             <original_video_name>.avi   ← selectively corrupted version
 
 Corruption is applied *per-frame* as a Bernoulli draw:
-    with probability  p  (default 0.75)  →  apply corruption
-    with probability  1-p               →  keep frame unchanged
+    with probability  p  (default 0.65)  ->  apply corruption
+    with probability  1-p               ->  keep frame unchanged
 
 The final video is the time-concatenation of all processed frames.
 
 Supported corruption types
 --------------------------
-  gauss     – additive Gaussian noise
-  pepper    – random black pixels (pepper noise)
-  salt      – random white pixels (salt noise)
-  shot      – Poisson (shot) noise
-  impulse   – combined salt-and-pepper (impulse noise)
-  defocus   – defocus blur (Gaussian disc approximation)
-  motion    – linear horizontal motion blur
-  zoom      – zoom / radial blur
-  jpeg      – JPEG compression artefacts
-  contrast  – reduced contrast
-  rain      – synthetic rain streaks
-  h265_abr  – H.265 ABR compression artefacts
+  gauss     - additive Gaussian noise
+  pepper    - random black pixels (pepper noise)
+  salt      - random white pixels (salt noise)
+  shot      - Poisson (shot) noise
+  impulse   - combined salt-and-pepper (impulse noise)
+  defocus   - defocus blur (Gaussian disc approximation)
+  motion    - linear horizontal motion blur
+  zoom      - zoom / radial blur
+  jpeg      - JPEG compression artefacts
+  contrast  - reduced contrast
+  rain      - synthetic rain streaks
+  h265_abr  - H.265 ABR compression artefacts
                (requires ffmpeg with libx265; falls back to heavy JPEG otherwise)
 
 Usage
@@ -44,7 +44,7 @@ Usage
   python corrupt_ucf50.py --corruption all
 
   # Custom options
-  python corrupt_ucf50.py --corruption all --prob 0.75 --severity 2 --workers 4 --seed 0
+  python corrupt_ucf50.py --corruption all --prob 0.65 --severity 2 --workers 4 --seed 0
 
 Dependencies
 ------------
@@ -53,6 +53,7 @@ Dependencies
 """
 
 import argparse
+import csv            
 import os
 import random
 import subprocess
@@ -65,7 +66,7 @@ from typing import Callable, Dict, List, Optional, Tuple
 import cv2
 import numpy as np
 
-# ── Optional tqdm ──────────────────────────────────────────────────────────────
+# -- Optional tqdm --------------------------------------------------------------
 try:
     from tqdm import tqdm
     _HAS_TQDM = True
@@ -83,7 +84,7 @@ except ImportError:
             print(s)
 
 
-# ── Constants ──────────────────────────────────────────────────────────────────
+# -- Constants ------------------------------------------------------------------
 
 CORRUPTION_TYPES: List[str] = [
     'gauss', 'pepper', 'salt', 'shot',
@@ -95,7 +96,7 @@ _SCRIPT_DIR = Path(__file__).resolve().parent
 _UCF50_DEFAULT = _SCRIPT_DIR / 'datasets' / 'UCF50'
 
 
-# ── Frame-level corruption functions (BGR uint8 in / BGR uint8 out) ────────────
+# -- Frame-level corruption functions (BGR uint8 in / BGR uint8 out) ------------
 
 def _gauss(frame: np.ndarray, sev: int) -> np.ndarray:
     """Additive white Gaussian noise."""
@@ -220,7 +221,7 @@ _FRAME_FN: Dict[str, Callable[[np.ndarray, int], np.ndarray]] = {
 }
 
 
-# ── Video I/O helpers ──────────────────────────────────────────────────────────
+# -- Video I/O helpers ----------------------------------------------------------
 
 def _read_video(path: Path) -> Tuple[List[np.ndarray], float, int, int]:
     """Return (frames, fps, width, height)."""
@@ -258,7 +259,7 @@ def _write_frames(frames: List[np.ndarray], path: Path, fps: float, w: int, h: i
     wr.release()
 
 
-# ── H.265 ABR via ffmpeg ───────────────────────────────────────────────────────
+# -- H.265 ABR via ffmpeg ------------------------------------------------------─
 
 def _check_ffmpeg_h265() -> bool:
     """Return True if ffmpeg with libx265 / hevc is available."""
@@ -327,7 +328,7 @@ def _jpeg_fallback_batch(frames: List[np.ndarray], quality: int) -> List[np.ndar
     return out
 
 
-# ── Per-video processing ───────────────────────────────────────────────────────
+# -- Per-video processing ------------------------------------------------------─
 
 def _process_frame_level(
     src: Path, dst: Path,
@@ -391,7 +392,7 @@ def _process_h265(
         return str(exc)
 
 
-# ── Multiprocessing worker (must be top-level for pickling) ───────────────────
+# -- Multiprocessing worker (must be top-level for pickling) ------------------─
 
 def _worker(task: tuple) -> Tuple[str, Optional[str]]:
     """
@@ -410,7 +411,7 @@ def _worker(task: tuple) -> Tuple[str, Optional[str]]:
     return (src_str, err)
 
 
-# ── CLI ────────────────────────────────────────────────────────────────────────
+# -- CLI ------------------------------------------------------------------------
 
 def _parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser(
@@ -425,8 +426,8 @@ def _parse_args() -> argparse.Namespace:
         ),
     )
     parser.add_argument(
-        '--prob', type=float, default=0.75,
-        help='Probability (0–1) of corrupting each frame (default: 0.75)',
+        '--prob', type=float, default=0.65,
+        help='Probability (0-1) of corrupting each frame (default: 0.65)',
     )
     parser.add_argument(
         '--severity', type=int, default=2, choices=range(1, 6), metavar='1-5',
@@ -452,13 +453,48 @@ def _parse_args() -> argparse.Namespace:
         '--seed', type=int, default=42,
         help='Base random seed for reproducibility (default: 42)',
     )
+    parser.add_argument(
+        '--mixed', action='store_true',
+        help='Mixed mode: apply one random corruption per video and save to a single folder.',
+    )
     return parser.parse_args()
+
+def _execute_tasks(tasks: list, workers: int, desc: str, out_dir: Path) -> None:
+    """Helper function to run multiprocessing and handle error reporting."""
+    errors: List[Tuple[str, str]] = []
+
+    if workers > 1:
+        with Pool(processes=workers) as pool:
+            bar = tqdm(
+                pool.imap_unordered(_worker, tasks),
+                total=len(tasks),
+                desc=f'{desc:>10s}',
+                unit='vid',
+            )
+            for src_str, err in bar:
+                if err:
+                    errors.append((src_str, err))
+    else:
+        for task in tqdm(tasks, desc=f'{desc:>10s}', unit='vid'):
+            src_str, err = _worker(task)
+            if err:
+                errors.append((src_str, err))
+
+    if errors:
+        print(f'  ! {len(errors)} video(s) failed:')
+        for path_str, msg in errors[:5]:
+            print(f'      {Path(path_str).name}: {msg}')
+        if len(errors) > 5:
+            print(f'      … and {len(errors) - 5} more (increase verbosity to see all).')
+
+    ok_count = len(tasks) - len(errors)
+    print(f'  {ok_count}/{len(tasks)} videos written -> {out_dir}\n')
 
 
 def main() -> None:
     args = _parse_args()
 
-    # ── Resolve corruption list ────────────────────────────────────────────────
+    # -- Resolve corruption list ------------------------------------------------
     if 'all' in args.corruption:
         corruptions = CORRUPTION_TYPES[:]
     else:
@@ -472,14 +508,14 @@ def main() -> None:
             sys.exit(1)
         corruptions = list(args.corruption)
 
-    # ── Validate source directory ──────────────────────────────────────────────
+    # -- Validate source directory ----------------------------------------------
     if not args.src.is_dir():
         print(f'[ERROR] Source directory not found: {args.src}', file=sys.stderr)
         sys.exit(1)
 
     dst_root = args.dst_root if args.dst_root else args.src.parent
 
-    # ── Check ffmpeg / libx265 availability ───────────────────────────────────
+    # -- Check ffmpeg / libx265 availability ----------------------------------─
     has_ffmpeg = False
     if 'h265_abr' in corruptions:
         has_ffmpeg = _check_ffmpeg_h265()
@@ -490,13 +526,13 @@ def main() -> None:
                 '       For true H.265 artefacts: sudo apt install ffmpeg\n'
             )
 
-    # ── Collect source videos ─────────────────────────────────────────────────
+    # -- Collect source videos ------------------------------------------------─
     src_videos = sorted(args.src.rglob('*.avi'))
     if not src_videos:
         print(f'[ERROR] No .avi files found under {args.src}', file=sys.stderr)
         sys.exit(1)
 
-    # ── Summary ───────────────────────────────────────────────────────────────
+    # -- Summary --------------------------------------------------------------─
     print('=' * 60)
     print(f'  Source      : {args.src}')
     print(f'  Videos      : {len(src_videos)}')
@@ -509,58 +545,64 @@ def main() -> None:
     print('=' * 60)
     print()
 
-    # ── Process each corruption type ──────────────────────────────────────────
-    for corruption in corruptions:
-        out_dir = dst_root / f'UCF50_{corruption}'
-        print(f'[{corruption:>10s}]  →  {out_dir}')
+    # -- Process corruptions (Mixed or Separate) ------------------------------─
+    if args.mixed:
+        out_dir = dst_root / 'UCF50_mixed'
+        csv_path = dst_root / 'UCF50_mixed_labels.csv'
+        print(f'[MIXED MODE]  ->  {out_dir}')
+        print(f'[LOG FILE]    ->  {csv_path}')
+        
+        # Dedicated random generator for assigning corruptions reliably
+        assign_rng = random.Random(args.seed)
+        tasks = []
+        csv_records = []
 
-        # Build task list: one entry per video
-        tasks = [
-            (
+        for i, src_p in enumerate(src_videos):
+            chosen_corruption = assign_rng.choice(corruptions)
+            rel_path = src_p.relative_to(args.src)
+            dst_p = out_dir / rel_path
+            
+            tasks.append((
                 str(src_p),
-                str(out_dir / src_p.relative_to(args.src)),
-                corruption,
+                str(dst_p),
+                chosen_corruption,
                 args.severity,
                 args.prob,
-                args.seed + i,   # per-video seed offset for reproducibility
+                args.seed + i,
                 has_ffmpeg,
-            )
-            for i, src_p in enumerate(src_videos)
-        ]
+            ))
+            csv_records.append([str(rel_path), chosen_corruption])
 
-        errors: List[Tuple[str, str]] = []
+        # Write the tracking CSV
+        csv_path.parent.mkdir(parents=True, exist_ok=True)
+        with open(csv_path, 'w', newline='') as f:
+            writer = csv.writer(f)
+            writer.writerow(['video_path', 'corruption_type'])
+            writer.writerows(csv_records)
 
-        if args.workers > 1:
-            with Pool(processes=args.workers) as pool:
-                bar = tqdm(
-                    pool.imap_unordered(_worker, tasks),
-                    total=len(tasks),
-                    desc=f'{corruption:>10s}',
-                    unit='vid',
+        # We wrap the existing execution logic in a helper to avoid repeating it
+        _execute_tasks(tasks, args.workers, 'mixed', out_dir)
+
+    else:
+        for corruption in corruptions:
+            out_dir = dst_root / f'UCF50_{corruption}'
+            print(f'[{corruption:>10s}]  ->  {out_dir}')
+
+            tasks = [
+                (
+                    str(src_p),
+                    str(out_dir / src_p.relative_to(args.src)),
+                    corruption,
+                    args.severity,
+                    args.prob,
+                    args.seed + i,
+                    has_ffmpeg,
                 )
-                for src_str, err in bar:
-                    if err:
-                        errors.append((src_str, err))
-        else:
-            # Single-process path (easier to debug)
-            for task in tqdm(tasks, desc=f'{corruption:>10s}', unit='vid'):
-                src_str, err = _worker(task)
-                if err:
-                    errors.append((src_str, err))
-
-        if errors:
-            print(f'  ! {len(errors)} video(s) failed:')
-            for path_str, msg in errors[:5]:
-                print(f'      {Path(path_str).name}: {msg}')
-            if len(errors) > 5:
-                print(f'      … and {len(errors) - 5} more (increase verbosity to see all).')
-
-        ok_count = len(tasks) - len(errors)
-        print(f'  ✓ {ok_count}/{len(tasks)} videos written → {out_dir}\n')
+                for i, src_p in enumerate(src_videos)
+            ]
+            _execute_tasks(tasks, args.workers, corruption, out_dir)
 
     print('All corruptions complete.')
 
-
 if __name__ == '__main__':
     main()
-    # just changing here
