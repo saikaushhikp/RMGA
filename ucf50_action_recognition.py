@@ -423,8 +423,8 @@ class ViTTA:
                 param.requires_grad_(False)
 
         n_trainable = sum(p.numel() for p in adapted.parameters() if p.requires_grad)
-        print(f"[ViTTA] Adapting {len(bn_param_names)} BN param tensors "
-              f"({n_trainable:,} scalars) at test time.")
+        # print(f"[ViTTA] Adapting {len(bn_param_names)} BN param tensors "
+            #   f"({n_trainable:,} scalars) at test time.")
         return adapted
 
     @staticmethod
@@ -519,6 +519,7 @@ def train_one_epoch(model, loader, criterion, optimizer, device, epoch):
     total_loss, correct, total = 0.0, 0, 0
     t0 = time.time()
     for step, (clips, labels) in enumerate(loader):
+        print(f"  [Epoch {epoch}] Step {step+1}/{len(loader)} ...", end="\r")
         clips, labels = clips.to(device), labels.to(device)
         optimizer.zero_grad()
         logits = model(clips)

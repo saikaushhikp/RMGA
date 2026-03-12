@@ -426,8 +426,8 @@ def _parse_args() -> argparse.Namespace:
         ),
     )
     parser.add_argument(
-        '--prob', type=float, default=0.75,
-        help='Probability (0-1) of corrupting each frame (default: 0.75)',
+        '--prob', type=float, default=0.70,
+        help='Probability (0-1) of corrupting each frame (default: 0.70)',
     )
     parser.add_argument(
         '--severity', type=int, default=4, choices=range(1, 6), metavar='1-5',
@@ -606,4 +606,3 @@ def main() -> None:
 
 if __name__ == '__main__':
     main()
-    # just commented 
