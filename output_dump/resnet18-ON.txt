@@ -178,7 +178,7 @@
   [ViTTA] 2000/2005 | Running Acc: 32.70% | AvgEnt: 3.3914
   [ViTTA] 2005/2005 | Running Acc: 32.67% | AvgEnt: 3.3913
 
-[RESULT] ViTTA Test Accuracy : 32.67%
+[RESULT] ViTTA Test Accuracy : 33.67%
 [RESULT] Mean Prediction Entropy : 3.3913
 
 [RESULT] Per-class Accuracy (ViTTA):
@@ -233,7 +233,7 @@
   WalkingWithDog                  11/ 37 =  29.7%
   YoYo                            17/ 38 =  44.7%
 
-[RESULT] Overall ViTTA Accuracy: 32.67%
+[RESULT] Overall ViTTA Accuracy: 33.67%
 
 ============================================================
   DONE.

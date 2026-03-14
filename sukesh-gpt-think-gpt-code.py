@@ -253,35 +253,59 @@ class VideoDataset(Dataset):
         clip = torch.stack(tensors, dim=0)         # (T, C, H, W)
         return clip, self.labels[idx]
 
+# ─────────────────────────────────────────────────────────────
+# ADAPTER MODULE (ViTTA-Adapters improvement)
+# ─────────────────────────────────────────────────────────────
+class Adapter(nn.Module):
+    """
+    Lightweight residual adapter module.
+
+    x → Linear(C→r) → ReLU → Linear(r→C) → +x
+    """
+
+    def __init__(self, dim, bottleneck=64):
+        super().__init__()
+        self.down = nn.Linear(dim, bottleneck)
+        self.act = nn.ReLU(inplace=True)
+        self.up = nn.Linear(bottleneck, dim)
+
+    def forward(self, x):
+        return x + self.up(self.act(self.down(x)))
 
 # ─────────────────────────────────────────────────────────────
 # 5.  MODEL BUILDER
 # ─────────────────────────────────────────────────────────────
+
 class FrameAggregator(nn.Module):
     """
-    Wraps a 2-D CNN backbone.
-    For each video clip (B, T, C, H, W):
-      - Extracts frame-level features  (B*T, feat_dim)
-      - Mean-pools over T frames        (B, feat_dim)
-      - Classifies                      (B, num_classes)
+    Backbone → temporal pooling → adapter → classifier
     """
+
     def __init__(self, backbone: nn.Module, feat_dim: int, num_classes: int):
         super().__init__()
-        self.backbone    = backbone
-        self.classifier  = nn.Sequential(
+        self.backbone = backbone
+
+        # NEW: adapter module
+        self.adapter = Adapter(feat_dim, bottleneck=64)
+
+        self.classifier = nn.Sequential(
             nn.Dropout(p=0.3),
             nn.Linear(feat_dim, num_classes)
         )
 
     def forward(self, x):
-        # x: (B, T, C, H, W)
         B, T, C, H, W = x.shape
-        x = x.view(B * T, C, H, W)          # (B*T, C, H, W)
-        feats = self.backbone(x)             # (B*T, feat_dim)
-        feats = feats.view(B, T, -1)         # (B, T, feat_dim)
-        feats = feats.mean(dim=1)            # (B, feat_dim)  — temporal pooling
-        return self.classifier(feats)        # (B, num_classes)
 
+        x = x.view(B*T, C, H, W)
+        feats = self.backbone(x)
+
+        feats = feats.view(B, T, -1)
+        feats = feats.mean(dim=1)
+
+        # Adapter adaptation layer
+        feats = self.adapter(feats)
+
+        return self.classifier(feats)
 
 def build_model(num_classes: int, model_name=MODEL_NAME,
                 feat_dim=FEATURE_DIM, pretrained=PRETRAINED):
@@ -385,55 +409,30 @@ class ViTTA:
         self.device         = device
 
     # ── Internal helpers ───────────────────────────────────────────────────────
+    
+    
     @staticmethod
     def _copy_model_to_adapt(model):
-        """
-        Deep-copy and configure for BN-only adaptation.
 
-        WHY module-type check instead of name-string matching:
-        Many backbones (MobileNetV3, EfficientNet, …) store BatchNorm layers
-        under purely numeric keys like 'backbone.0.0.1.weight', so substring
-        checks for 'bn' / 'norm' find nothing and leave zero trainable params,
-        causing the Adam optimizer to raise 'empty parameter list'.
-
-        Fix: collect the exact parameter names that belong to BatchNorm
-        modules by iterating named_modules(), then enable grad only for those.
-        """
         adapted = copy.deepcopy(model)
-        adapted.train()    # puts BN layers into train mode → use batch stats
+        adapted.train()
 
-        # 1. Collect all param names that live inside a BatchNorm module
-        bn_param_names = set()
-        for mod_name, module in adapted.named_modules():
-            if isinstance(module, nn.modules.batchnorm._BatchNorm):
-                # Each BN module has 'weight' and 'bias' as direct params
-                for param_name, _ in module.named_parameters(recurse=False):
-                    full_name = f"{mod_name}.{param_name}" if mod_name else param_name
-                    bn_param_names.add(full_name)
+        # Freeze everything
+        for p in adapted.parameters():
+            p.requires_grad = False
 
-        if not bn_param_names:
-            # Fallback: if the backbone has no BN at all (rare), allow the
-            # classifier head to be adapted instead so the optimizer is never empty.
-            print("[ViTTA] ⚠  No BatchNorm layers found — falling back to "
-                  "classifier-head adaptation.")
-            for mod_name, module in adapted.named_modules():
-                if mod_name.startswith("classifier"):
-                    for param_name, _ in module.named_parameters(recurse=False):
-                        full_name = f"{mod_name}.{param_name}" if mod_name else param_name
-                        bn_param_names.add(full_name)
-
-        # 2. Freeze everything; unfreeze only the identified params
-        for name, param in adapted.named_parameters():
-            if name in bn_param_names:
-                param.requires_grad_(True)
-            else:
-                param.requires_grad_(False)
+        # Unfreeze adapter parameters only
+        for name, module in adapted.named_modules():
+            if isinstance(module, Adapter):
+                for p in module.parameters():
+                    p.requires_grad = True
 
         n_trainable = sum(p.numel() for p in adapted.parameters() if p.requires_grad)
-        # print(f"[ViTTA] Adapting {len(bn_param_names)} BN param tensors "
-            #   f"({n_trainable:,} scalars) at test time.")
-        return adapted
 
+        print(f"[ViTTA-Adapters] adapting {n_trainable:,} parameters")
+
+        return adapted
+    
     @staticmethod
     def _entropy(logits: torch.Tensor) -> torch.Tensor:
         probs = torch.softmax(logits, dim=-1)
@@ -452,19 +451,44 @@ class ViTTA:
 
     # ── Entropy minimisation (optional self-supervised step) ──────────────────
     def _entropy_min(self, adapted_model, clip_tensors):
+        
         trainable_params = [p for p in adapted_model.parameters() if p.requires_grad]
+
         if not trainable_params:
-            # Safety net: should never happen after the fixed _copy_model_to_adapt,
-            # but skip silently rather than crash.
-            print("[ViTTA] ⚠  _entropy_min skipped — no trainable params found.")
             return
+
         opt = optim.Adam(trainable_params, lr=self.adapt_lr)
+
         for _ in range(self.adapt_steps):
+
             logits_list = []
+
             for clip in clip_tensors:
-                logits_list.append(adapted_model(clip.unsqueeze(0).to(self.device)))
-            logits_all = torch.cat(logits_list, dim=0)   # (n_clips, C)
-            loss = self._entropy(logits_all)
+                logits = adapted_model(clip.unsqueeze(0).to(self.device))
+                logits_list.append(logits)
+
+            logits_all = torch.cat(logits_list, dim=0)
+
+            # ---------- Entropy loss ----------
+            probs = torch.softmax(logits_all, dim=-1)
+            entropy = -(probs * torch.log(probs + 1e-8)).sum(dim=-1).mean()
+
+            # ---------- Temporal consistency ----------
+            mean_prob = probs.mean(dim=0, keepdim=True)
+
+            kl_loss = 0
+            for p in probs:
+                kl_loss += torch.nn.functional.kl_div(
+                    torch.log(p + 1e-8),
+                    mean_prob.squeeze(0),
+                    reduction='batchmean'
+                )
+
+            kl_loss = kl_loss / len(probs)
+
+            # Final loss
+            loss = entropy + 0.5 * kl_loss
+
             opt.zero_grad()
             loss.backward()
             opt.step()

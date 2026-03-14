@@ -149,7 +149,7 @@
     LR    = 0.000001
     ★ New best model saved → best_model.pth (Acc=27.33%)
 
-[TRAIN DONE] Best Test Accuracy: 27.33%
+[TRAIN DONE] Best Test Accuracy: 33.33%
 
 ============================================================
   EVALUATION  (ViTTA=OFF)
@@ -210,7 +210,7 @@
   WalkingWithDog                   7/ 37 =  18.9%
   YoYo                             9/ 38 =  23.7%
 
-[RESULT] Overall Accuracy: 27.33%
+[RESULT] Overall Accuracy: 33.33%
 
 ============================================================
   DONE.
