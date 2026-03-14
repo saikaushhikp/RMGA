@@ -20,14 +20,16 @@ SWAP THE MODEL  — only change the 3 lines below:
 
 # ============================================================
 # ⚙️  MODEL SWAP ZONE — change only these 3 lines for a new backbone
-# MODEL_NAME   = "mobilenet_v3_small"               # torchvision model function name
-# FEATURE_DIM  = 576                                 # channels coming out of backbone (before head)
-# PRETRAINED   = True                                # use ImageNet pretrained weights
+MODEL_NAME   = "mobilenet_v3_small"               # torchvision model function name
+FEATURE_DIM  = 576                                 # channels coming out of backbone (before head)
+PRETRAINED   = True                                # use ImageNet pretrained weights
 # ============================================================
 
-MODEL_NAME   = "efficientnet_b1"
-FEATURE_DIM  = 1280
-PRETRAINED   = True
+# MODEL_NAME   = "efficientnet_b1"
+# FEATURE_DIM  = 1280
+
+# MODEL_NAME   = "resnet18"
+# FEATURE_DIM  = 512
 
 import os, sys, copy, time, random, argparse, warnings
 from pathlib import Path
@@ -70,7 +72,7 @@ def build_parser():
 
     # Training
     p.add_argument("--epochs",      type=int,   default=40)
-    p.add_argument("--batch_size",  type=int,   default=8)
+    p.add_argument("--batch_size",  type=int,   default=16)
     p.add_argument("--lr",          type=float, default=1e-3)
     p.add_argument("--weight_decay",type=float, default=1e-4)
     p.add_argument("--num_workers", type=int,   default=4)
@@ -201,9 +203,9 @@ def build_transforms(img_size, train=True):
             T.ToPILImage(),
             T.Resize((img_size + 16, img_size + 16)),
             # T.Resize((img_size, img_size)),
-            T.RandomCrop(img_size),
-            T.RandomHorizontalFlip(),
-            T.ColorJitter(brightness=0.2, contrast=0.2, saturation=0.2),
+            # T.RandomCrop(img_size),
+            # T.RandomHorizontalFlip(),
+            # T.ColorJitter(brightness=0.2, contrast=0.2, saturation=0.2),
             T.ToTensor(),
             T.Normalize(MEAN, STD),
         ])
