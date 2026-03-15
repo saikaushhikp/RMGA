@@ -24,21 +24,18 @@ Default : MobileNetV3-Small (lightweight, RTX-3050 friendly)
 ============================================================
 
 SWAP THE MODEL  — only change the 3 lines below:
-
-Commands via CLI:
-
 """
 
 # ============================================================
 # ⚙️  MODEL SWAP ZONE — change only these 3 lines for a new backbone
 #
 # ── 2D CNN options (existing pipeline) ──
-MODEL_NAME   = "mobilenet_v3_small"   # torchvision model function name
+# MODEL_NAME   = "mobilenet_v3_small"   # torchvision model function name
 FEATURE_DIM  = 576                    # channels out of 2D backbone (ignored for video models)
 PRETRAINED   = True                   # use ImageNet / Kinetics pretrained weights
 #
 # ── 3D Video model options (NEW) ──────────
-# MODEL_NAME = "r3d_18"               # ResNet-3D-18      | input (B,C,T,H,W)
+MODEL_NAME = "r3d_18"               # ResNet-3D-18      | input (B,C,T,H,W)
 # MODEL_NAME = "mc3_18"               # Mixed-Conv3D-18   | input (B,C,T,H,W)
 # MODEL_NAME = "r2plus1d_18"          # R(2+1)D-18        | input (B,C,T,H,W)
 #
@@ -103,7 +100,7 @@ def build_parser():
 
     # ── Training ──────────────────────────────────────────────
     p.add_argument("--epochs",       type=int,   default=40)
-    p.add_argument("--batch_size",   type=int,   default=8)
+    p.add_argument("--batch_size",   type=int,   default=16)
     p.add_argument("--lr",           type=float, default=1e-3)
     p.add_argument("--weight_decay", type=float, default=1e-4)
     p.add_argument("--num_workers",  type=int,   default=4)
@@ -374,17 +371,30 @@ class VideoModel3D(nn.Module):
         return self.backbone(x)   # (B, num_classes)
 
 
-def build_model(num_classes: int, model_name=MODEL_NAME,
-                feat_dim=FEATURE_DIM, pretrained=PRETRAINED):
+def build_model(num_classes: int, model_name=None,
+                feat_dim=None, pretrained=None):
     """
     Build and return the appropriate model.
+
+    Defaults fall back to the module-level MODEL_NAME / FEATURE_DIM / PRETRAINED
+    constants. Using None here (instead of the globals directly) avoids a
+    NameError when Python evaluates default argument values at function-definition
+    time, before the constants are guaranteed to be in scope.
 
     [3D SUPPORT] If model_name is in VIDEO_MODELS, loads from
     torchvision.models.video and wraps in VideoModel3D.
     Otherwise, existing 2D FrameAggregator pipeline is used unchanged.
     """
+    # Resolve defaults from module-level constants
+    if model_name is None:
+        model_name = MODEL_NAME
+    if feat_dim is None:
+        feat_dim = FEATURE_DIM
+    if pretrained is None:
+        pretrained = PRETRAINED
+
     print(f"\n[MODEL] Loading backbone : {model_name} (pretrained={pretrained})")
-    print(f"[MODEL] Pipeline         : {'3D Video Model' if IS_VIDEO_MODEL else '2D CNN + FrameAggregator'}")
+    print(f"[MODEL] Pipeline         : {'3D Video Model' if model_name in VIDEO_MODELS else '2D CNN + FrameAggregator'}")
 
     # ── [3D SUPPORT] Video model branch ───────────────────────────────────────
     if model_name in VIDEO_MODELS:
@@ -676,9 +686,9 @@ class RMGA:
         for name, param in adapted.named_parameters():
             param.requires_grad_(name in selected)
 
-        n_trainable = sum(p.numel() for p in adapted.parameters() if p.requires_grad)
-        print(f"[RMGA] Adapting {len(selected)} BN tensors "
-              f"({n_trainable:,} scalars) — last {last_bn_blocks} BN blocks.")
+        # n_trainable = sum(p.numel() for p in adapted.parameters() if p.requires_grad)
+        # print(f"[RMGA] Adapting {len(selected)} BN tensors "
+            #   f"({n_trainable:,} scalars) — last {last_bn_blocks} BN blocks.")
         return adapted, selected
 
     @staticmethod
@@ -936,7 +946,90 @@ def save_checkpoint(model, optimizer, epoch, path):
 
 
 # ─────────────────────────────────────────────────────────────
-# 9.  MAIN
+# 9.  CHECKPOINT LOADER  (key-remapping helper)
+# ─────────────────────────────────────────────────────────────
+def smart_load_state_dict(model: nn.Module, path, device):
+    """
+    Robust state-dict loader that handles three common key-format mismatches:
+
+    Problem (the error you hit):
+    ─────────────────────────────
+    A checkpoint saved from a raw torchvision video model (e.g. r3d_18)
+    has flat keys:  "stem.0.weight", "layer1…", "fc.weight"
+
+    But VideoModel3D wraps the net as self.backbone, so PyTorch now expects:
+                        "backbone.stem.0.weight", "backbone.layer1…", etc.
+
+    This mismatch crashes load_state_dict() with "Missing / Unexpected keys".
+
+    Strategy (try in order, stop at first success):
+    ───────────────────────────────────────────────
+    1. Strict load  — works when checkpoint and current model match perfectly.
+    2. Add "backbone." prefix to every key in the saved dict.
+       Fixes: raw-model checkpoint → VideoModel3D wrapper.
+    3. Strip "backbone." prefix from every key in the saved dict.
+       Fixes: VideoModel3D checkpoint → raw model (inverse of case 2).
+    4. Load with strict=False as a last resort — partial loading,
+       prints a warning so the user knows something was skipped.
+
+    Also transparently unwraps checkpoints saved by save_checkpoint()
+    (which stores {"epoch":…, "model": state_dict, "optimizer":…}).
+    """
+    raw = torch.load(path, map_location=device)
+
+    # Unwrap save_checkpoint() dicts that contain a "model" key
+    if isinstance(raw, dict) and "model" in raw and "epoch" in raw:
+        print(f"[CKPT] Detected save_checkpoint() format — extracting 'model' key.")
+        state_dict = raw["model"]
+    else:
+        state_dict = raw
+
+    # ── Strategy 1: strict load ───────────────────────────────
+    try:
+        model.load_state_dict(state_dict, strict=True)
+        print(f"[CKPT] ✅ Loaded (strict)  ← {path}")
+        return
+    except RuntimeError:
+        pass
+
+    # ── Strategy 2: add "backbone." prefix ────────────────────
+    # Needed when checkpoint was saved from a raw torchvision net
+    # but the current model wraps it inside VideoModel3D.backbone
+    remapped = {"backbone." + k: v for k, v in state_dict.items()}
+    try:
+        model.load_state_dict(remapped, strict=True)
+        print(f"[CKPT] ✅ Loaded (added 'backbone.' prefix)  ← {path}")
+        return
+    except RuntimeError:
+        pass
+
+    # ── Strategy 3: strip "backbone." prefix ──────────────────
+    # Needed when checkpoint has backbone. keys but model is unwrapped.
+    stripped = {}
+    for k, v in state_dict.items():
+        new_key = k[len("backbone."):] if k.startswith("backbone.") else k
+        stripped[new_key] = v
+    try:
+        model.load_state_dict(stripped, strict=True)
+        print(f"[CKPT] ✅ Loaded (stripped 'backbone.' prefix)  ← {path}")
+        return
+    except RuntimeError:
+        pass
+
+    # ── Strategy 4: non-strict fallback ───────────────────────
+    # Loads whatever keys match; skips the rest.
+    missing, unexpected = model.load_state_dict(state_dict, strict=False)
+    print(f"[CKPT] ⚠  Loaded with strict=False  ← {path}")
+    if missing:
+        print(f"[CKPT]    Missing  ({len(missing)}): {missing[:5]}"
+              f"{'…' if len(missing) > 5 else ''}")
+    if unexpected:
+        print(f"[CKPT]    Unexpected ({len(unexpected)}): {unexpected[:5]}"
+              f"{'…' if len(unexpected) > 5 else ''}")
+
+
+# ─────────────────────────────────────────────────────────────
+# 10.  MAIN
 # ─────────────────────────────────────────────────────────────
 def main():
     args = build_parser().parse_args()
@@ -1065,12 +1158,12 @@ def main():
                 save_checkpoint(model, optimizer, epoch, ckpt_path)
 
         print(f"\n[TRAIN DONE] Best Test Accuracy: {best_acc:.2f}%")
-        model.load_state_dict(torch.load(args.best_model, map_location=device))
+        smart_load_state_dict(model, args.best_model, device)
 
     elif args.mode == "eval_only":
         if args.load_weights is None:
             raise ValueError("--load_weights must be set in eval_only mode")
-        model.load_state_dict(torch.load(args.load_weights, map_location=device))
+        smart_load_state_dict(model, args.load_weights, device)
         print(f"[EVAL] Loaded weights from {args.load_weights}")
 
     # ── Step 5: Final Evaluation ──────────────────────────────
