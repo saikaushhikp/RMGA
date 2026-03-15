@@ -66,6 +66,6 @@ def generate_ucf50_metadata(ucf50_folder_path):
 
 if __name__ == "__main__":
     # Update this path if your UCF50 folder is located elsewhere
-    TARGET_FOLDER = "./datasets/UCF50" 
+    TARGET_FOLDER = "./datasets/UCF50"
     
     generate_ucf50_metadata(TARGET_FOLDER)
