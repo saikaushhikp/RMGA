@@ -1,5 +1,4 @@
-# VidTENT
-Video Adaptation for TENT method for TTA
+# RMGA
 
 # Download the UCF50 dataset and place it in the following structure:
 ```
